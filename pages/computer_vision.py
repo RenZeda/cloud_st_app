@@ -1,44 +1,76 @@
 import json
 import streamlit as st
+import pandas as pd
+import altair as alt
 from google.cloud import vision
-
-# 定数の定義部分
+from PIL import Image
+import io
+import requests
 
 # Google APIキーの読み取り
 credentials_dict = json.loads(st.secrets["google_credentials"], strict=False)
 client = vision.ImageAnnotatorClient.from_service_account_info(info=credentials_dict)
 
-# 関数の定義部分
-
-# 画像処理 API とのやりとりとキャッシュ関数
-@st.cache_data
+@st.cache_data(ttl=60)
 def get_response(content):
     image = vision.Image(content=content)
     response = client.label_detection(image=image)
-    
     return response
 
-# 以下、表示部分
-st.markdown("# 画像認識")
+st.markdown("# 🖼️ 画像認識アプリ")
 
-# 画像ファイルのアップロード
-file = st.file_uploader("画像ファイルをアップロードしてください")
+# --- 左右に分割 ---
+col1, col2 = st.columns([1, 2])
 
-if file is not None:
-    # 画像の表示
-    content = file.getvalue()
-    st.image(content)
+with col1:
+    st.subheader("画像入力")
 
-# 画像解析
-if st.button("解析をする"):
-    response = get_response(content)
-    labels = response.label_annotations
-    st.write("Labels:")
-    if response.error.message:
-        raise Exception(
-            f"{response.error.message}\nFor more info on error messages, check: "
-            "https://cloud.google.com/apis/design/errors"
-        )
-    # 検出されたラベルを表示
-    for label in labels:
-        st.write(label.description)
+    # 上传文件 or 输入URL
+    file = st.file_uploader("画像ファイルをアップロード")
+    url = st.text_input("または画像URLを入力")
+
+    content = None
+    if file is not None:
+        # 压缩一下图像
+        img = Image.open(file)
+        img.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        content = buf.getvalue()
+        st.image(content, caption="アップロードした画像")
+
+    elif url:
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200:
+                content = r.content
+                st.image(content, caption="URLから取得した画像")
+            else:
+                st.warning("⚠️ URLから画像を取得できませんでした。")
+        except Exception as e:
+            st.warning(f"⚠️ URLエラー: {e}")
+
+    run = st.button("解析する")
+
+with col2:
+    st.subheader("解析結果")
+    if run:
+        if content is None:
+            st.warning("⚠️ 先に画像をアップロードするかURLを入力してください。")
+        else:
+            response = get_response(content)
+            if response.error.message:
+                st.error(f"APIエラー: {response.error.message}")
+            else:
+                labels = [(label.description, label.score) for label in response.label_annotations]
+                if not labels:
+                    st.info("ラベルが検出されませんでした。")
+                else:
+                    df = pd.DataFrame(labels, columns=["Label", "Score"])
+                    st.dataframe(df)
+
+                    chart = alt.Chart(df).mark_bar().encode(
+                        x="Score:Q",
+                        y=alt.Y("Label:N", sort="-x")
+                    )
+                    st.altair_chart(chart, use_container_width=True)
